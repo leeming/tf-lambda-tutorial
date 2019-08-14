@@ -1,0 +1,76 @@
+Intro:
+- Writing lambdas in terraform
+- Lambda features:
+    - Step function
+    - Layer
+    - Custom runtime
+
+Problem background:
+What had to be run
+- Configure RDS
+    - Create role + schemas (if not exist)
+- Run liquibase data migrations
+
+Originally had RDS config using postgres provider in tf (https://www.terraform.io/docs/providers/postgresql/index.html)
+```
+provider "postgresql" {
+  alias    = "pg1"
+  host     = "postgres_server_ip1"
+  username = "postgres_user1"
+  password = "postgres_password1"
+}
+
+resource "postgresql_database" "my_db1" {
+  provider = "postgresql.pg1"
+  name     = "my_db1"
+}
+```
+
+and liquibase run in jenkins pipeline for dev environment. We had multi accounts that we didn't have direct access to.
+Both these steps had to fully automated as part of a deployment.
+
+Deployment mechanism into client's prod account was via an instance running inside the default AWS VPC. We had internet access
+but no access to the RDS unless we opened up the security groups.
+
+Solution, write some simple lambdas and run them inside our VPC. Although the default VPC can't directly
+communicate with our secure VPC, it can still deploy things into it via AWS API and terraform.
+
+As lambdas have a time limit, our tasks were broken up.
+- Initial RDS config
+- Liquibase for service A
+- Liquibase for service B
+- Liquibase for service ...
+- Liquibase for service n
+
+The RDS config could be easily coded up in python using boto+pyycopg2 libs. Liquibase were a mix of
+java and shell scripts so required a custom runtime.
+
+Psycopg2 lib is used to connect to postgres (RDS) but is not included as part of the python runtime. 
+Had to grab the python dependency at build time and inject into the lambda artifact. However, not as
+easy as grabbing the lib from a pip install, used https://github.com/jkehler/awslambda-psycopg2.git
+
+
+
+Liquibase lambdas required a custom runtime (bash) that depended on two "layers", one for the liquibase
+runtime and another for the aws cli, as it was used in some of our existing scripts for fetching secrets.
+
+Making the liquibase layer is done created by a small bash script similar to the following:
+```
+if [ ! -f "${LIQUIBASE_HOME}/liquibase" ]; then
+    mkdir -p ${LIQUIBASE_HOME}
+    curl -s -L -o /tmp/liquibase.zip https://github.com/liquibase/liquibase/releases/download/liquibase-parent-3.5.5/liquibase-3.5.5-bin.zip
+    unzip -q /tmp/liquibase.zip -d ${LIQUIBASE_HOME}
+    rm /tmp/liquibase.zip
+fi
+
+if [ ! -f "${JDBC_DRIVER}" ]; then
+    mkdir -p ${LIB_DIR}
+    curl -s -o ${JDBC_DRIVER} https://jdbc.postgresql.org/download/postgresql-42.2.5.jar
+fi
+```
+
+The aws cli layer is a little more involved. I am not aware there is a pre-packaged binary/artifact to simply
+grab with curl, so the route I went down was to use `pip install` inside a virtualenv and pull out the
+artifacts. This article provided the majority of the process https://bezdelev.com/hacking/aws-cli-inside-lambda-layer-aws-s3-sync/
+The only extra step I did was to remove the `examples/` directory as it wasn't needed and made the layer
+quite chunky (fair few MBs)
