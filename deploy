@@ -1,0 +1,9 @@
+poll until success
+aws iam get-role --role-name "foobar"
+
+
+arn = terraform state show aws_sfn_state_machine.sfn_state_machine -no-color | grep '^id' | cut -d '=' -f2 | aws '{$1=$1};1'
+exe_arn = aws stepfuctions start-execution --region '' --state-mahine-arn "$ARN from above" --input "{}" | jq -r '.executionArn'
+
+poll until success
+aws stepfunctions describe-execution --region '' --execution-arn "exe_arn" | jq -r '.status'
